@@ -21,8 +21,16 @@ namespace ConvertSysLogToCEF
         private static string ConvertToCEF(string Version, string DeviceVendor, string DeviceProduct, string DeviceVersion, int SignatureID, int Severity, string SysLog)
         {
             string question = GetQuestion(SysLog);
-            string answers = GetAnswers(SysLog);
-            string ret = Version + "|" + DeviceVendor + "|" + DeviceProduct + "|" + DeviceVersion + "|" + SignatureID + "|" + question + "|" + Severity + "|" + answers;
+            string answers = GetAnswers(question, SysLog);
+            string ret = null;
+            if (String.IsNullOrEmpty(answers))
+            {
+                ret = null;
+            }
+            else
+            {
+                ret = Version + "|" + DeviceVendor + "|" + DeviceProduct + "|" + DeviceVersion + "|" + SignatureID.ToString() + "|" + question + "|" + Severity.ToString() + "|" + answers;
+            }
             return ret;
         }
         private static string GetQuestion(string SysLog)
@@ -30,30 +38,49 @@ namespace ConvertSysLogToCEF
             string ret = Between(SysLog, "[", "@");
             return ret;
         }
-        private static string GetAnswers(string SysLog)
+        private static string GetAnswers(string Question, string SysLog)
         {
             string answerSection = Between(SysLog, "[", "]");
             string[] answersSplit = answerSection.Split(new Char[] { ' ' });
 
-            //Filter out question and return just the answers
+            //Return only answer columns from map file
             int i = 0;
             string ret = null;
             int upper = answersSplit.Length - 1;
+            string mappedAnswer = null;
             foreach (string answer in answersSplit)
             {
-                if (i != 0 && i != upper)
+                if (i != 0)
                 {
-                    ret += answer + " ";
-                }
-                else if (i == upper)
-                {
-                    ret += answer;
+                    mappedAnswer = GetMappedAnswer(Question, answer.ToString());
+                    if (!(String.IsNullOrEmpty(mappedAnswer)))
+                    {
+                        if (i != upper)
+                        {
+                            ret += mappedAnswer + " ";
+                        }
+                        else if (i == upper)
+                        {
+                            ret += mappedAnswer;
+                        }
+                    }
                 }
                 i++;
             }
+
             return ret;
         }
-        public static string Between(this string Source, string FindFrom, string FindTo)
+
+        private static string GetMappedAnswer(string question, string answer)
+        {
+            string[] answerSplit = answer.Split(new Char[] { '=' });
+            string setting = GetSetting(question, answerSplit[0]);
+            string ret = null;
+            if (!(string.IsNullOrEmpty(setting)))
+                ret = setting + "=" + answerSplit[1];
+            return ret;
+        }
+        private static string Between(this string Source, string FindFrom, string FindTo)
         {
             int start = Source.IndexOf(FindFrom);
             int to = Source.IndexOf(FindTo, start + FindFrom.Length);
@@ -65,15 +92,13 @@ namespace ConvertSysLogToCEF
         }
 
         //Networking Functions
-        public static void AcceptClient(ref TcpClient client, TcpListener listener)
-        {
-            if (client == null)
-                client = listener.AcceptTcpClient();
-        }
         public static void ConvertSysLogMessages()
         {
             //Initialize settings
             ParseConfigurationFile(ConfigurationFilePath);
+
+            //Validate settings
+            ValidateSettings();
 
             //Get send and receive ports
             int receivePort, sendPort;
@@ -84,12 +109,13 @@ namespace ConvertSysLogToCEF
             int signatureID, severity;
             Int32.TryParse(GetSetting("ConvertSysLogToCEF", "SignatureID"), out signatureID);
             Int32.TryParse(GetSetting("ConvertSysLogToCEF", "Severity"), out severity);
-            
+
             //Get CEF column values that are string based
             string version = GetSetting("ConvertSysLogToCEF", "Version");
             string deviceVendor = GetSetting("ConvertSysLogToCEF", "DeviceVendor");
             string deviceProduct = GetSetting("ConvertSysLogToCEF", "DeviceProduct");
             string deviceVersion = GetSetting("ConvertSysLogToCEF", "DeviceVersion");
+            string sendHost = GetSetting("ConvertSysLogToCEF", "SendHost");
 
             //Start listening for data
             TcpListener listener = new TcpListener(new IPEndPoint(IPAddress.Any, receivePort));
@@ -113,7 +139,7 @@ namespace ConvertSysLogToCEF
                     if (handler != null)
                     {
                         WriteErrorLog("Incoming TCP connection established");
-                        TcpClient send = new TcpClient("localhost", sendPort);
+                        TcpClient send = new TcpClient(sendHost, sendPort);
                         NetworkStream receiveStream = handler.GetStream();
                         NetworkStream sendStream = send.GetStream();
                         StreamReader reader = new StreamReader(receiveStream);
@@ -128,8 +154,13 @@ namespace ConvertSysLogToCEF
                             {
                                 WriteErrorLog("DataIn: " + line);
                                 string cef = ConvertToCEF(version, deviceVendor, deviceProduct, deviceVersion, signatureID, severity, line);
-                                writer.Write(cef + "\n");
-                                WriteErrorLog("DataOut: " + cef);
+                                if (string.IsNullOrEmpty(cef))
+                                    WriteErrorLog("DataOut: CEF Conversion Mapping not found in Configuration File, skipping");
+                                else
+                                {
+                                    writer.Write(cef + "\n");
+                                    WriteErrorLog("DataOut: " + cef);
+                                }
                             }
                         } while (!(string.IsNullOrEmpty(line)));
                         reader.Dispose();
@@ -149,9 +180,14 @@ namespace ConvertSysLogToCEF
                 WriteErrorLog(e);
             }
         }
+        private static void AcceptClient(ref TcpClient client, TcpListener listener)
+        {
+            if (client == null)
+                client = listener.AcceptTcpClient();
+        }
 
         //Configuration File Handling Functions
-        public static void ParseConfigurationFile(String ConfigFilePath)
+        private static void ParseConfigurationFile(String ConfigFilePath)
         {
             TextReader iniFile = null;
             String line = null;
@@ -210,18 +246,20 @@ namespace ConvertSysLogToCEF
                         iniFile.Close();
                 }
             }
+        }
 
-            //Validate Settings
+        private static void ValidateSettings()
+        {
             int receivePort, sendPort, signatureID, severity;
 
-            bool parsedReceivePort = Int32.TryParse(GetSetting("ConvertSysLogToCEF", "SendPort"), out receivePort);
+            bool parsedReceivePort = Int32.TryParse(GetSetting("ConvertSysLogToCEF", "ReceivePort"), out receivePort);
             if (!(parsedReceivePort))
             {
                 WriteErrorLog("Unable to get ReceivePort, setting to 17480");
                 SectionPair sectionPair;
                 sectionPair.Section = "ConvertSysLogToCEF";
                 sectionPair.Key = "ReceivePort";
-                keyPairs.Add(sectionPair, 17480);
+                keyPairs.Add(sectionPair, "17480");
             }
             else
                 WriteErrorLog("Setting: ReceivePort = " + receivePort);
@@ -233,7 +271,7 @@ namespace ConvertSysLogToCEF
                 SectionPair sectionPair;
                 sectionPair.Section = "ConvertSysLogToCEF";
                 sectionPair.Key = "SendPort";
-                keyPairs.Add(sectionPair, 17481);
+                keyPairs.Add(sectionPair, "17481");
             }
             else
                 WriteErrorLog("Setting: SendPort = " + sendPort);
@@ -245,7 +283,7 @@ namespace ConvertSysLogToCEF
                 SectionPair sectionPair;
                 sectionPair.Section = "ConvertSysLogToCEF";
                 sectionPair.Key = "SignatureID";
-                keyPairs.Add(sectionPair, 0);
+                keyPairs.Add(sectionPair, "0");
             }
             else
                 WriteErrorLog("Setting: SignatureID = " + signatureID);
@@ -257,7 +295,7 @@ namespace ConvertSysLogToCEF
                 SectionPair sectionPair;
                 sectionPair.Section = "ConvertSysLogToCEF";
                 sectionPair.Key = "Severity";
-                keyPairs.Add(sectionPair, 0);
+                keyPairs.Add(sectionPair, "0");
             }
             else
                 WriteErrorLog("Setting: Severity = " + severity);
@@ -273,6 +311,18 @@ namespace ConvertSysLogToCEF
             }
             else
                 WriteErrorLog("Setting: Version = " + version);
+
+            string sendHost = GetSetting("ConvertSysLogToCEF", "SendHost");
+            if (string.IsNullOrEmpty(sendHost))
+            {
+                WriteErrorLog("Unable to get SendHost, setting to localhost");
+                SectionPair sectionPair;
+                sectionPair.Section = "ConvertSysLogToCEF";
+                sectionPair.Key = "SendHost";
+                keyPairs.Add(sectionPair, "localhost");
+            }
+            else
+                WriteErrorLog("Setting: SendHost = " + sendHost);
 
             string deviceVendor = GetSetting("ConvertSysLogToCEF", "DeviceVendor");
             if (string.IsNullOrEmpty(deviceVendor))
@@ -310,14 +360,13 @@ namespace ConvertSysLogToCEF
             else
                 WriteErrorLog("Setting: DeviceProduct = " + deviceProduct);
         }
-
         private struct SectionPair
         {
             public String Section;
             public String Key;
         }
 
-        public static String GetSetting(String sectionName, String settingName)
+        private static String GetSetting(String sectionName, String settingName)
         {
             SectionPair sectionPair;
             sectionPair.Section = sectionName;
@@ -327,7 +376,7 @@ namespace ConvertSysLogToCEF
         }
 
         //Logging Functions
-        public static void WriteErrorLog(Exception Ex)
+        private static void WriteErrorLog(Exception Ex)
         {
             StreamWriter sw = null;
             try
@@ -339,15 +388,22 @@ namespace ConvertSysLogToCEF
             }
             catch { }
         }
-        public static void WriteErrorLog(string Message)
+        private static void WriteErrorLog(string Message)
         {
             StreamWriter sw = null;
-            FileInfo logFile = new FileInfo(LogFile);
-            FileInfo oldLogFile = new FileInfo(OldLogFile);
+            try
+            {
+                sw = new StreamWriter(LogFile, true);
+                sw.WriteLine(DateTime.Now.ToString() + ": " + Message);
+                sw.Flush();
+                sw.Close();
+            }
+            catch { }
 
+            //Rotate log file if needed
+            FileInfo logFile = new FileInfo(LogFile);
             if (logFile.Length >= 10 * 1048576)
             {
-                //Rotate log file
                 if (File.Exists(OldLogFile))
                     File.Delete(OldLogFile);
 
@@ -366,14 +422,6 @@ namespace ConvertSysLogToCEF
                     }
                 }
             }
-            try
-            {
-                sw = new StreamWriter(LogFile, true);
-                sw.WriteLine(DateTime.Now.ToString() + ": " + Message);
-                sw.Flush();
-                sw.Close();
-            }
-            catch { }
         }
     }
 }

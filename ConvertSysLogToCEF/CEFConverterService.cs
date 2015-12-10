@@ -155,7 +155,7 @@ namespace ConvertSysLogToCEF
                 }
                 catch
                 {
-                    throw;
+                    //The service throws an exception here, but stops anyway
                 }
             }
         }
