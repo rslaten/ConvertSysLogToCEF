@@ -14,12 +14,15 @@ namespace ConvertSysLogToCEF
         public static volatile bool Running;
         private static String LogFile = AppDomain.CurrentDomain.BaseDirectory + "\\ConvertSysLogToCEFConversion.log";
         private static String OldLogFile = AppDomain.CurrentDomain.BaseDirectory + "\\ConvertSysLogToCEFConversion.lo_";
+        private static int LoggingLevel = new Int32();
         private static String ConfigurationFilePath = AppDomain.CurrentDomain.BaseDirectory + "\\ConvertSysLogToCEFConversion.ini";
         private static Hashtable keyPairs = new Hashtable();
         
         //CEF Conversion Functions
         private static string ConvertToCEF(string Version, string DeviceVendor, string DeviceProduct, string DeviceVersion, int SignatureID, int Severity, string SysLog)
         {
+            WriteErrorLog(2, "Function ConvertToCEF(Version, DeviceVendor, DeviceProduct, DeviceVersion, SignatureID, Severity, SysLog)");
+            string cefDate = GetCEFDate(SysLog);
             string question = GetQuestion(SysLog);
             string answers = GetAnswers(question, SysLog);
             string ret = null;
@@ -29,17 +32,19 @@ namespace ConvertSysLogToCEF
             }
             else
             {
-                ret = Version + "|" + DeviceVendor + "|" + DeviceProduct + "|" + DeviceVersion + "|" + SignatureID.ToString() + "|" + question + "|" + Severity.ToString() + "|" + answers;
+                ret = cefDate + " " + DeviceVendor + " " + Version + "|" + DeviceVendor + "|" + DeviceProduct + "|" + DeviceVersion + "|" + SignatureID.ToString() + "|" + question + "|" + Severity.ToString() + "|" + answers;
             }
             return ret;
         }
         private static string GetQuestion(string SysLog)
         {
+            WriteErrorLog(2, "Function GetQuestion(SysLog)");
             string ret = Between(SysLog, "[", "@");
             return ret;
         }
         private static string GetAnswers(string Question, string SysLog)
         {
+            WriteErrorLog(2, "Function GetAnswers(Question, SysLog)");
             string answerSection = Between(SysLog, "[", "]");
             string[] answersSplit = answerSection.Split(new Char[] { ' ' });
 
@@ -73,6 +78,7 @@ namespace ConvertSysLogToCEF
 
         private static string GetMappedAnswer(string question, string answer)
         {
+            WriteErrorLog(2, "Function GetMappedAnswer(question, answer)");
             string[] answerSplit = answer.Split(new Char[] { '=' });
             string setting = GetSetting(question, answerSplit[0]);
             string ret = null;
@@ -82,12 +88,21 @@ namespace ConvertSysLogToCEF
         }
         private static string Between(this string Source, string FindFrom, string FindTo)
         {
+            WriteErrorLog(2, "Between(Source, FindFrom, FindTo)");
             int start = Source.IndexOf(FindFrom);
             int to = Source.IndexOf(FindTo, start + FindFrom.Length);
             if (start < 0 || to < 0) return "";
             string ret = Source.Substring(
                            start + FindFrom.Length,
                            to - start - FindFrom.Length);
+            return ret;
+        }
+        private static string GetCEFDate(string sysLog)
+        {
+            WriteErrorLog(2, "Function GetCEFDate(sysLog)");
+            string ret = null;
+            string[] sysLogSplit = sysLog.Split(new Char[] { ' ' });
+            ret = sysLogSplit[1];
             return ret;
         }
 
@@ -99,6 +114,10 @@ namespace ConvertSysLogToCEF
 
             //Validate settings
             ValidateSettings();
+
+            //Initialize Logging
+            Int32.TryParse(GetSetting("ConvertSysLogToCEF", "LogLevel"), out LoggingLevel);
+            WriteErrorLog(2, "Function ConvertSysLogMessages()");
 
             //Get send and receive ports
             int receivePort, sendPort;
@@ -145,6 +164,8 @@ namespace ConvertSysLogToCEF
                         StreamReader reader = new StreamReader(receiveStream);
                         StreamWriter writer = new StreamWriter(sendStream);
                         string line = null;
+                        int i = 0;
+                        int n = 0;
 
                         do
                         {
@@ -152,14 +173,18 @@ namespace ConvertSysLogToCEF
 
                             if (!(string.IsNullOrEmpty(line)))
                             {
-                                WriteErrorLog("DataIn: " + line);
+                                WriteErrorLog(1, "DataIn: " + line);
                                 string cef = ConvertToCEF(version, deviceVendor, deviceProduct, deviceVersion, signatureID, severity, line);
                                 if (string.IsNullOrEmpty(cef))
-                                    WriteErrorLog("DataOut: CEF Conversion Mapping not found in Configuration File, skipping");
+                                {
+                                    WriteErrorLog(1, "DataOut: CEF Conversion Mapping not found in Configuration File, skipping");
+                                    n++;
+                                }
                                 else
                                 {
                                     writer.Write(cef + "\n");
-                                    WriteErrorLog("DataOut: " + cef);
+                                    WriteErrorLog(1, "DataOut: " + cef);
+                                    i++;
                                 }
                             }
                         } while (!(string.IsNullOrEmpty(line)));
@@ -167,7 +192,7 @@ namespace ConvertSysLogToCEF
                         writer.Dispose();
                         receiveStream.Dispose();
                         sendStream.Dispose();
-                        WriteErrorLog("Connection completed");
+                        WriteErrorLog("Connection completed: " + i + " messages converted. " + n + " messages skipped.");
                         handler = null;
                     }
                 }
@@ -182,6 +207,7 @@ namespace ConvertSysLogToCEF
         }
         private static void AcceptClient(ref TcpClient client, TcpListener listener)
         {
+            WriteErrorLog(2, "Function AcceptClient(client, listener)");
             if (client == null)
                 client = listener.AcceptTcpClient();
         }
@@ -250,7 +276,7 @@ namespace ConvertSysLogToCEF
 
         private static void ValidateSettings()
         {
-            int receivePort, sendPort, signatureID, severity;
+            int receivePort, sendPort, signatureID, severity, logLevel;
 
             bool parsedReceivePort = Int32.TryParse(GetSetting("ConvertSysLogToCEF", "ReceivePort"), out receivePort);
             if (!(parsedReceivePort))
@@ -299,6 +325,18 @@ namespace ConvertSysLogToCEF
             }
             else
                 WriteErrorLog("Setting: Severity = " + severity);
+
+            bool parsedLogLevel = Int32.TryParse(GetSetting("ConvertSysLogToCEF", "LogLevel"), out logLevel);
+            if (!(parsedLogLevel))
+            {
+                WriteErrorLog("Unable to get LogLevel, setting to 0");
+                SectionPair sectionPair;
+                sectionPair.Section = "ConvertSysLogToCEF";
+                sectionPair.Key = "LogLevel";
+                keyPairs.Add(sectionPair, "0");
+            }
+            else
+                WriteErrorLog("Setting: LogLevel = " + logLevel);
 
             string version = GetSetting("ConvertSysLogToCEF", "Version");
             if (string.IsNullOrEmpty(version))
@@ -382,7 +420,7 @@ namespace ConvertSysLogToCEF
             try
             {
                 sw = new StreamWriter(LogFile, true);
-                sw.WriteLine(DateTime.Now.ToString() + ": " + Ex.Source.ToString().Trim() + "; " + Ex.Message.ToString().Trim());
+                sw.WriteLine(DateTime.Now.ToString() + " ERROR: " + Ex.Source.ToString().Trim() + "; " + Ex.Message.ToString().Trim());
                 sw.Flush();
                 sw.Close();
             }
@@ -398,30 +436,71 @@ namespace ConvertSysLogToCEF
                 sw.Flush();
                 sw.Close();
             }
-            catch { }
+            catch(Exception e)
+            {
+                WriteErrorLog(e);
+            }
 
             //Rotate log file if needed
             FileInfo logFile = new FileInfo(LogFile);
             if (logFile.Length >= 10 * 1048576)
             {
-                if (File.Exists(OldLogFile))
-                    File.Delete(OldLogFile);
+                RollLogFile(logFile);
+            }
+        }
 
-                bool fileExists = true;
-                while (fileExists)
+        private static void WriteErrorLog(int LogLevel, string Message)
+        {
+            if (LogLevel == 1 && (LoggingLevel == 1 || LoggingLevel == 2))
+            {
+                try
                 {
-                    if (File.Exists(OldLogFile))
-                    {
-                        Thread.Sleep(500);
-                        WriteErrorLog("Waiting on log file to roll...");
-                    }
-                    else
-                    {
-                        logFile.MoveTo(OldLogFile);
-                        fileExists = false;
-                    }
+                    StreamWriter sw = null;
+                    sw = new StreamWriter(LogFile, true);
+                    sw.WriteLine(DateTime.Now.ToString() + ":Verbose: " + Message);
+                    sw.Flush();
+                    sw.Close();
+                }
+                catch (Exception e)
+                {
+                    WriteErrorLog(e);
                 }
             }
+
+            if (LogLevel == 2 && LoggingLevel == 2)
+            {
+                try
+                {
+                    StreamWriter sw = null;
+                    sw = new StreamWriter(LogFile, true);
+                    sw.WriteLine(DateTime.Now.ToString() + ":Debug: " + Message);
+                    sw.Flush();
+                    sw.Close();
+                }
+                catch (Exception e)
+                {
+                    WriteErrorLog(e);
+                }
+            }
+        }
+
+        private static void RollLogFile(FileInfo logFile)
+        {
+            WriteErrorLog(2, "Rolling Log File: " + logFile.ToString());
+            try
+            {
+                if (File.Exists(OldLogFile))
+                {
+                    File.Delete(OldLogFile);
+                }
+                logFile.MoveTo(OldLogFile);
+            }
+            catch (Exception e)
+            {
+                //This can happen if there is a lot of logging activity, but it will recover in between streams
+                WriteErrorLog(2, "Failed to rename log file, will retry on next attempt. Error: " + e);
+            }
+            logFile = null;
         }
     }
 }
